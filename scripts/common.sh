@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-POSTGRES_CONTAINER=${POSTGRES_CONTAINER:-keria_postgres}
+POSTGRES_CONTAINER=${POSTGRES_CONTAINER:-kueria_postgres}
 
 validate_student() {
   if ! [[ "$1" =~ ^[a-z_][a-z0-9_]*$ ]] || (( ${#1} > 63 )) ||

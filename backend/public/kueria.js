@@ -1,6 +1,6 @@
 // === Constants ===
 const API_URL = 'api';
-const SESSION_STORAGE_KEY = 'keria.session';
+const SESSION_STORAGE_KEY = 'kueria.session';
 let sessionId = null;
 
 // === State ===

@@ -2,7 +2,7 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_PASSWORD: keria-test-only
+      POSTGRES_PASSWORD: kueria-test-only
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 1s
@@ -14,7 +14,7 @@ services:
       target: test
     environment:
       TEST_DATABASE_HOST: postgres
-      TEST_DATABASE_PASSWORD: keria-test-only
+      TEST_DATABASE_PASSWORD: kueria-test-only
       SCRIPT_DIR: /scripts
     volumes:
       - ./scripts:/scripts:ro

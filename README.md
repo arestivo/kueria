@@ -1,8 +1,8 @@
-# Keria - Web-based PostgreSQL Environment for Students
+# Kueria - Web-based PostgreSQL Environment for Students
 
 ## Overview
 
-Keria provides a simple, self-contained PostgreSQL environment designed for educational purposes. It allows students to interact with their own isolated PostgreSQL database through a web interface, without needing to install or configure a database server on their personal computers.
+Kueria provides a simple, self-contained PostgreSQL environment designed for educational purposes. It allows students to interact with their own isolated PostgreSQL database through a web interface, without needing to install or configure a database server on their personal computers.
 
 The entire environment runs within Docker, making setup and management straightforward for instructors. Each student is given their own user account and a dedicated database, keeping each student’s data separate.
 
@@ -41,7 +41,7 @@ The entire environment runs within Docker, making setup and management straightf
     ```sh
     docker compose up --build -d
     ```
-    This will start two services: the PostgreSQL database and the Keria web application backend. The web interface will be available at `http://localhost:3000` by default.
+    This will start two services: the PostgreSQL database and the Kueria web application backend. The web interface will be available at `http://localhost:3000` by default.
 
 ---
 
@@ -87,7 +87,7 @@ All administrative tasks are performed using the provided shell scripts from you
 
 ### Student Guide
 
-1.  **Access Keria**
+1.  **Access Kueria**
     Open your web browser and navigate to the URL provided by your instructor (e.g., `http://localhost:3000`).
 
 2.  **Connect to Your Database**
@@ -135,8 +135,8 @@ With Node 24 installed, run `npm ci` and `npm test` from `backend`. Use `npm run
 Run the complete test suite against an isolated PostgreSQL 16 server:
 
 ```sh
-docker compose -p keria-tests -f compose.test.yml up --build --abort-on-container-exit --exit-code-from tests
-docker compose -p keria-tests -f compose.test.yml down --volumes
+docker compose -p kueria-tests -f compose.test.yml up --build --abort-on-container-exit --exit-code-from tests
+docker compose -p kueria-tests -f compose.test.yml down --volumes
 ```
 
 The test stack uses its own network and containers, exposes no ports, and has no access to student data. GitHub Actions runs the same suite. Instructor scripts accept `POSTGRES_CONTAINER` to target a separately named database container.

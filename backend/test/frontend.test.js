@@ -77,7 +77,7 @@ for (const withCodeMirror of [false, true]) {
     };
     await p.run('ConnectionManager.connect()');
     assert.equal(password, ' leading and trailing ');
-    assert.equal(p.window.sessionStorage.getItem('keria.session'), 'test');
+    assert.equal(p.window.sessionStorage.getItem('kueria.session'), 'test');
     if (p.editor) assert.equal(p.editor.refreshes, 1);
     const sql = "\n SELECT '😀';\n SELEC 1;";
     p.window.sql = sql;
@@ -101,7 +101,7 @@ for (const withCodeMirror of [false, true]) {
     p.run('QueryEditor.setValue(window.sql); ResultsView.set(true)');
     p.window.fetch = async () => ({ json: async () => ({ success: true }) });
     await p.run('ConnectionManager.disconnect()');
-    assert.equal(p.window.sessionStorage.getItem('keria.session'), null);
+    assert.equal(p.window.sessionStorage.getItem('kueria.session'), null);
     assert.equal(p.run('QueryEditor.getValue()'), '');
     assert.equal(p.document.getElementById('queryEditor').value, '');
     assert(!p.document.body.classList.contains('no-scroll'));
@@ -118,7 +118,7 @@ test('API validation errors remain visible without a PostgreSQL message', async 
 
 test('reload restores the saved session without another login', async t => {
   const p = page(t);
-  p.window.sessionStorage.setItem('keria.session', 'saved-session');
+  p.window.sessionStorage.setItem('kueria.session', 'saved-session');
   const requests = [];
   p.window.fetch = async url => {
     requests.push(url);

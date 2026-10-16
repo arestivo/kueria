@@ -154,7 +154,7 @@ test('PostgreSQL and HTTP integration', { skip: !process.env.TEST_DATABASE_HOST,
     child.kill('SIGTERM');
     const [code] = await exited;
     assert.equal(code, 0, logs);
-    const active = await admin.query("SELECT count(*)::integer AS count FROM pg_stat_activity WHERE usename = $1 AND application_name = 'keria'", [username]);
+    const active = await admin.query("SELECT count(*)::integer AS count FROM pg_stat_activity WHERE usename = $1 AND application_name = 'kueria'", [username]);
     assert.equal(active.rows[0].count, 0);
   } finally {
     if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await exited; }

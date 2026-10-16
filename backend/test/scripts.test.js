@@ -7,7 +7,7 @@ const { test } = require('node:test');
 
 const scripts = process.env.SCRIPT_DIR || path.join(__dirname, '../../scripts');
 function runScript(t, name, args, env = {}) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'keria-scripts-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'kueria-scripts-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const log = path.join(directory, 'calls.jsonl');
   fs.writeFileSync(path.join(directory, 'docker'), `#!/usr/bin/env node

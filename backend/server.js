@@ -154,7 +154,7 @@ app.post('/api/connect', async (req, res) => {
       connectionTimeoutMillis: 5000,
       statement_timeout: QUERY_LIMITS.timeout,
       idle_in_transaction_session_timeout: 120000,
-      application_name: 'keria'
+      application_name: 'kueria'
     };
     pool = new Pool(config);
     pool.on('error', (error) => {
