@@ -64,7 +64,7 @@ const UI = {
   hideTimers: new Map(),
 
   showMessage(text, type, target = DOM.messageBanner) {
-    target.className = `mb-4 p-4 rounded-lg flex items-center gap-2 ${
+    target.className = `p-4 rounded-lg flex items-center gap-2 ${
       type === 'error'
         ? 'bg-red-50 text-red-700 border border-red-200'
         : 'bg-green-50 text-green-700 border border-green-200'
