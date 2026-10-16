@@ -116,6 +116,35 @@ test('API validation errors remain visible without a PostgreSQL message', async 
   assert(p.document.getElementById('messageBanner').textContent.includes('Connection limit reached'));
 });
 
+test('a newer message stays visible for its full duration', t => {
+  const p = page(t);
+  const timers = [];
+  p.window.setTimeout = callback => { timers.push({ callback }); return timers.length; };
+  p.window.clearTimeout = id => { if (timers[id - 1]) timers[id - 1].cleared = true; };
+  p.run("UI.showMessage('first', 'error'); UI.showMessage('second', 'success');");
+  const banner = p.document.getElementById('messageBanner');
+  if (!timers[0].cleared) timers[0].callback();
+  assert(!banner.classList.contains('hidden'));
+  assert.equal(banner.textContent, 'second');
+  timers.at(-1).callback();
+  assert(banner.classList.contains('hidden'));
+});
+
+test('an expired session returns to the login screen', async t => {
+  const p = page(t);
+  p.window.sessionStorage.setItem('kueria.session', 'old-session');
+  p.run("sessionId = 'old-session'; ConnectionManager.showConnected('alice')");
+  p.window.fetch = async url => url.endsWith('disconnect')
+    ? { status: 200, json: async () => ({ success: true }) }
+    : { status: 401, json: async () => ({ success: false, error: 'Session expired. Please reconnect.' }) };
+  await p.run("QueryManager._execute('SELECT 1')");
+  assert.equal(p.run('sessionId'), null);
+  assert.equal(p.window.sessionStorage.getItem('kueria.session'), null);
+  assert(!p.document.getElementById('loginScreen').classList.contains('hidden'));
+  assert(p.document.getElementById('mainInterface').classList.contains('hidden'));
+  assert.equal(p.document.getElementById('loginMessage').textContent, 'Session expired. Please reconnect.');
+});
+
 test('reload restores the saved session without another login', async t => {
   const p = page(t);
   p.window.sessionStorage.setItem('kueria.session', 'saved-session');

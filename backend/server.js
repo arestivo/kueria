@@ -71,15 +71,29 @@ async function sessionQuery(session, text, values) {
 }
 
 // Session lifetime (ms)
-const SESSION_TTL = 1000 * 60 * 60; // 1 hour
+const SESSION_TTL = 1000 * 60 * 60 * 12; // 12 hours
+// Abandoned tabs must not hold a student's quota slots for the whole lifetime.
+const SESSION_IDLE_TTL = 1000 * 60 * 30; // 30 minutes
+
+function isExpired(session, now = Date.now()) {
+  return session.expiresAt < now || session.lastActiveAt + SESSION_IDLE_TTL < now;
+}
+
+function sweepExpired() {
+  const now = Date.now();
+  return Promise.all([...connections]
+    .filter(([, session]) => isExpired(session, now))
+    .map(([id]) => closeSession(id)));
+}
 
 function getSession(req, res, allowBusy = false) {
   const session = connections.get(req.params.sessionId);
-  if (!session || session.expiresAt < Date.now()) {
+  if (!session || isExpired(session)) {
     if (session) void closeSession(req.params.sessionId);
     res.status(401).json({ success: false, error: 'Session expired. Please reconnect.' });
     return null;
   }
+  session.lastActiveAt = Date.now();
   if (session.busy && !allowBusy) {
     res.status(409).json({ success: false, error: 'A query is already running. Please wait.' });
     return null;
@@ -132,6 +146,8 @@ app.post('/api/connect', async (req, res) => {
     });
   }
   
+  // Free quota held by expired sessions without waiting for the sweeper.
+  void sweepExpired();
   const pendingCount = [...pendingLogins.values()].reduce((sum, count) => sum + count, 0);
   const userCount = [...connections.values()].filter(session => session.username === username).length;
   if (connections.size + closingPools.size + pendingCount >= MAX_SESSIONS ||
@@ -169,17 +185,18 @@ app.post('/api/connect', async (req, res) => {
       client.on('end', () => { void closeSession(sessionId); });
     });
 
-    // Test connection
+    // Test connection; the admin role must never get a web SQL console.
     const client = await pool.connect();
     try {
-      await client.query('SELECT NOW()');
+      const result = await client.query("SELECT current_setting('is_superuser') = 'on' AS superuser");
+      if (result.rows[0]?.superuser) throw new Error(`Refused superuser login for ${username}`);
     } finally {
       client.release();
     }
 
     // Generate session ID
     const now = Date.now();
-    connections.set(sessionId, { pool, config, username, busy: false, createdAt: now, expiresAt: now + SESSION_TTL });
+    connections.set(sessionId, { pool, config, username, busy: false, createdAt: now, lastActiveAt: now, expiresAt: now + SESSION_TTL });
 
     res.json({ 
       success: true, 
@@ -390,16 +407,7 @@ const server = app.listen(positiveInteger('PORT', 3000), '0.0.0.0', () => {
 });
 
 // Periodic sweeper to close expired sessions
-const sessionSweeper = setInterval(async () => {
-  const now = Date.now();
-  const expired = [];
-  for (const [id, session] of connections.entries()) {
-    if (session && session.expiresAt && session.expiresAt < now) {
-      expired.push(closeSession(id));
-    }
-  }
-  await Promise.all(expired);
-}, 1000 * 60 * 5); // every 5 minutes
+const sessionSweeper = setInterval(sweepExpired, 1000 * 60 * 5); // every 5 minutes
 
 let shuttingDown = false;
 async function shutdown(signal) {

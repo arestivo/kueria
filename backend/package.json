@@ -1,7 +1,7 @@
 {
-  "name": "postgres-student-interface",
+  "name": "kueria",
   "version": "1.0.0",
-  "description": "PostgreSQL Student Interface - Web-based database management tool",
+  "description": "Kueria - Web-based PostgreSQL environment for students",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

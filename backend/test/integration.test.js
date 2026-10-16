@@ -119,6 +119,12 @@ test('PostgreSQL and HTTP integration', { skip: !process.env.TEST_DATABASE_HOST,
       assert((await query("SELECT 'pg_catalog CREATE FUNCTION COPY FROM' AS example")).success);
     });
 
+    await t.test('the PostgreSQL administrator cannot log in through the web app', async () => {
+      const refused = await request('connect', { username: 'postgres', password: process.env.TEST_DATABASE_PASSWORD });
+      assert.equal(refused.success, false);
+      assert.equal(refused.error, 'Connection failed');
+    });
+
     await t.test('the deadline cancels queries even after SET statement_timeout = 0', async () => {
       const started = Date.now();
       const result = await query('SET statement_timeout = 0; SELECT pg_sleep(2)');

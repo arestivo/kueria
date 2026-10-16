@@ -60,6 +60,9 @@ const QueryEditor = {
 
 // === Utility Helpers ===
 const UI = {
+  // One hide timer per banner, so an older message cannot hide a newer one.
+  hideTimers: new Map(),
+
   showMessage(text, type, target = DOM.messageBanner) {
     target.className = `mb-4 p-4 rounded-lg flex items-center gap-2 ${
       type === 'error'
@@ -68,7 +71,8 @@ const UI = {
     }`;
     target.textContent = text;
     target.classList.remove('hidden');
-    setTimeout(() => target.classList.add('hidden'), 5000);
+    clearTimeout(this.hideTimers.get(target));
+    this.hideTimers.set(target, setTimeout(() => target.classList.add('hidden'), 5000));
   },
 
   showLoginMessage(text, type) {
@@ -90,15 +94,19 @@ const UI = {
 
 // === Networking Helper ===
 async function apiFetch(path, options = {}) {
+  let response, data;
   try {
-    const response = await fetch(`${API_URL}/${path}`, {
+    response = await fetch(`${API_URL}/${path}`, {
       headers: { 'Content-Type': 'application/json' },
       ...options
     });
-    return await response.json();
+    data = await response.json();
   } catch (err) {
     throw new Error(err.message || 'Network error');
   }
+  // An expired session leaves the main view unusable, so return to the login screen.
+  if (response.status === 401 && sessionId) await ConnectionManager.expire(data.error);
+  return data;
 }
 
 // === Connection Management ===
@@ -163,6 +171,11 @@ const ConnectionManager = {
     } finally {
       UI.toggleButtonLoading(DOM.connectBtn, 'Connect', false);
     }
+  },
+
+  async expire(message) {
+    await this.disconnect();
+    UI.showLoginMessage(message || 'Session expired. Please reconnect.', 'error');
   },
 
   async disconnect() {

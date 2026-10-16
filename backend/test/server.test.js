@@ -14,7 +14,7 @@ function deferred() {
 }
 
 // Exercise the actual route and signal handlers without a database or listener.
-function createServer({ loginFailure, closeWait, connectWait, env = {} } = {}) {
+function createServer({ loginFailure, closeWait, connectWait, superuser, env = {} } = {}) {
   const routes = new Map(), signals = new Map(), pools = [], exits = [], timers = [];
   const errors = [];
   let now = Date.now(), sweep, intervalCleared = false, httpCloseCount = 0;
@@ -37,7 +37,7 @@ function createServer({ loginFailure, closeWait, connectWait, env = {} } = {}) {
         release() { this.releases++; },
         query: async () => {
           if (this.queryError) throw new Error('Query failed');
-          return { fields: [], rows: [], rowCount: 0, command: 'SELECT' };
+          return { fields: [], rows: superuser ? [{ superuser: true }] : [], rowCount: 0, command: 'SELECT' };
         }
       });
       this.clients.push(client);
@@ -102,7 +102,8 @@ function createServer({ loginFailure, closeWait, connectWait, env = {} } = {}) {
     pools, exits, errors, timers, request,
     login: () => request('post /api/connect', { username: 'alice', password: 'password' }),
     signal: name => signals.get(name)(),
-    expire() { now += 61 * 60 * 1000; return sweep(); },
+    advance(elapsed) { now += elapsed; },
+    expire(elapsed = (12 * 60 + 1) * 60 * 1000) { now += elapsed; return sweep(); },
     get intervalCleared() { return intervalCleared; },
     get httpCloseCount() { return httpCloseCount; }
   };
@@ -117,6 +118,50 @@ for (const failure of ['connect', 'setup']) {
     if (failure === 'setup') assert.equal(server.pools[0].clients[0].releases, 1);
   });
 }
+
+test('superuser logins are refused and their pool is closed', async () => {
+  const server = createServer({ superuser: true });
+  const response = await server.login();
+  assert.equal(response.statusCode, 400);
+  assert.equal(response.body.success, false);
+  assert.equal(server.pools[0].clients[0].releases, 1);
+  assert.equal(server.pools[0].endCount, 1);
+});
+
+test('active sessions last at most twelve hours from login', async () => {
+  const server = createServer();
+  const { sessionId } = (await server.login()).body;
+  const restore = () => server.request('get /api/session/:sessionId', {}, { sessionId });
+  for (let step = 0; step < 35; step++) {
+    await server.expire(20 * 60 * 1000);
+    assert.equal((await restore()).statusCode, 200);
+  }
+  // 12h05m after login, but only 25 minutes after the last request.
+  await server.expire(25 * 60 * 1000);
+  assert.equal((await restore()).statusCode, 401);
+  assert.equal(server.pools[0].endCount, 1);
+});
+
+test('sessions close after thirty idle minutes', async () => {
+  const server = createServer();
+  const { sessionId } = (await server.login()).body;
+  const restore = () => server.request('get /api/session/:sessionId', {}, { sessionId });
+  await server.expire(29 * 60 * 1000);
+  assert.equal((await restore()).statusCode, 200);
+  await server.expire(31 * 60 * 1000);
+  assert.equal(server.pools[0].endCount, 1);
+  assert.equal((await restore()).statusCode, 401);
+});
+
+test('logins reclaim quota from idle sessions before the sweeper runs', async () => {
+  const server = createServer();
+  await server.login();
+  await server.login();
+  assert.equal((await server.login()).statusCode, 429);
+  server.advance(31 * 60 * 1000);
+  assert((await server.login()).body.success);
+  assert.deepEqual(server.pools.map(pool => pool.endCount), [1, 1, 0]);
+});
 
 test('successful login releases its client and handles idle pool errors', async () => {
   const server = createServer();

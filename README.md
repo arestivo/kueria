@@ -34,7 +34,7 @@ The entire environment runs within Docker, making setup and management straightf
     ```sh
     cp .env.example .env
     ```
-    Open the newly created `.env` file and set a secure password for `POSTGRES_PASSWORD`. This password is for the main PostgreSQL administrator (`postgres` user) and is required to manage the database instance.
+    Open the newly created `.env` file and set a secure password for `POSTGRES_PASSWORD`. This password is for the main PostgreSQL administrator (`postgres` user) and is required to manage the database instance. The web interface refuses superuser logins, so administration happens only through the scripts below.
 
 3.  **Build and Run the Environment**
     From the root directory of the project, run the following command to build the Docker images and start the services in the background:
@@ -106,7 +106,7 @@ All administrative tasks are performed using the provided shell scripts from you
 
 Execute accepts multiple statements and displays a separate result for each statement. Statements use PostgreSQL’s normal transaction rules. You can also execute `BEGIN`, make changes over several Execute clicks, and then execute `COMMIT` or `ROLLBACK`; a web session keeps the same database connection throughout.
 
-After an error inside a transaction, run `ROLLBACK` (or `ROLLBACK TO SAVEPOINT`) before continuing. The results header indicates an open transaction. Reloading a tab restores its existing session without consuming another connection slot. Disconnecting, closing an expired session, or losing the connection rolls back uncommitted work. Sessions expire after one hour; idle open transactions are terminated after two minutes.
+After an error inside a transaction, run `ROLLBACK` (or `ROLLBACK TO SAVEPOINT`) before continuing. The results header indicates an open transaction. Reloading a tab restores its existing session without consuming another connection slot. Disconnecting, closing an expired session, or losing the connection rolls back uncommitted work. Sessions close after 30 minutes without requests and at most twelve hours after login, returning the browser to the login screen; idle open transactions are terminated after two minutes.
 
 Large results display only a bounded set of rows and include a truncation notice. Truncation limits displayed data; the SQL statement still executes normally, including all its writes. A separate cancellation connection enforces the query deadline even if a script changes PostgreSQL’s own timeout setting.
 
