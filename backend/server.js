@@ -1,11 +1,12 @@
 // backend/server.js
 require('dotenv').config();
 const express = require('express');
-const { Pool } = require('pg');
+const { Client, Pool } = require('pg');
 const path = require('path');
 const crypto = require('crypto');
 const { countStatements, isValidIdentifier, quoteIdentifier } = require('./sql');
 const { runQuery, waitAfterError } = require('./query');
+const { MIN_PASSWORD_LENGTH, scramVerifier } = require('./password');
 const app = express();
 
 app.use(express.json({ limit: '256kb' }));
@@ -321,6 +322,39 @@ app.delete('/api/schemas/:sessionId/:schemaName', async (req, res) => {
   } catch (error) {
     console.error('Delete schema error:', error);
     res.status(400).json({ success: false, error: 'Failed to delete schema' });
+  }
+});
+
+// Change the student's own password; the browser checks the confirmation.
+app.post('/api/password/:sessionId', async (req, res) => {
+  const session = getSession(req, res, true);
+  if (!session) return;
+  const { currentPassword, newPassword } = req.body || {};
+  if (typeof currentPassword !== 'string' || !currentPassword || typeof newPassword !== 'string' ||
+      newPassword.length < MIN_PASSWORD_LENGTH || Buffer.byteLength(newPassword) > 1024) {
+    return res.status(400).json({ success: false, error: `The new password needs at least ${MIN_PASSWORD_LENGTH} characters.` });
+  }
+
+  // A separate connection verifies the current password and keeps the change
+  // outside any transaction the student has open on the session connection.
+  const client = new Client({ ...session.config, password: currentPassword });
+  client.on('error', () => {});
+  try {
+    await client.connect();
+    await client.query(`ALTER ROLE CURRENT_USER PASSWORD ${client.escapeLiteral(scramVerifier(newPassword))}`);
+    // Query cancellation opens new connections with the stored password.
+    for (const other of connections.values()) {
+      if (other.username === session.username) other.config.password = newPassword;
+    }
+    res.json({ success: true, message: 'Password changed' });
+  } catch (error) {
+    if (error.code === '28P01') {
+      return res.status(403).json({ success: false, error: 'The current password is incorrect.' });
+    }
+    console.error('Change password error:', error);
+    res.status(400).json({ success: false, error: 'Failed to change password' });
+  } finally {
+    await client.end().catch(() => {});
   }
 });
 

@@ -12,7 +12,7 @@ test('PostgreSQL and HTTP integration', { skip: !process.env.TEST_DATABASE_HOST,
   });
   await admin.connect();
   const username = `student_${Date.now()}`;
-  const password = " leading space ' slash\\ trailing ";
+  let password = " leading space ' slash\\ trailing ";
   const literal = value => "'" + value.replace(/'/g, "''") + "'";
   const identifier = value => '"' + value.replace(/"/g, '""') + '"';
   await admin.query(`CREATE ROLE ${identifier(username)} LOGIN PASSWORD ${literal(password)}`);
@@ -125,6 +125,25 @@ test('PostgreSQL and HTTP integration', { skip: !process.env.TEST_DATABASE_HOST,
       assert.equal(refused.error, 'Connection failed');
     });
 
+    await t.test('students change their password with a SCRAM verifier and stay connected', async () => {
+      // Exercises SASLprep: a ligature, a non-ASCII space, and accented letters.
+      const newPassword = 'ﬁne pässwörd';
+      const change = body => request(`password/${sessionId}`, body);
+      assert.equal((await change({ currentPassword: 'wrong', newPassword })).status, 403);
+      assert.equal((await change({ currentPassword: password, newPassword: 'short' })).status, 400);
+      const changed = await change({ currentPassword: password, newPassword });
+      assert(changed.success, JSON.stringify(changed));
+      const stored = await admin.query('SELECT rolpassword FROM pg_authid WHERE rolname = $1', [username]);
+      assert.match(stored.rows[0].rolpassword, /^SCRAM-SHA-256\$4096:/);
+      assert.equal((await request('connect', { username, password })).status, 400);
+      const relogin = await request('connect', { username, password: newPassword });
+      assert(relogin.success, JSON.stringify(relogin));
+      await request('disconnect', { sessionId: relogin.sessionId });
+      assert((await query('SELECT 1')).success);
+      password = newPassword;
+    });
+
+    // Runs after the password change, so cancellation must use the new password.
     await t.test('the deadline cancels queries even after SET statement_timeout = 0', async () => {
       const started = Date.now();
       const result = await query('SET statement_timeout = 0; SELECT pg_sleep(2)');

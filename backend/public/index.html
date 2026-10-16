@@ -67,12 +67,67 @@
             <p class="text-sm text-indigo-200" id="connectionInfo"></p>
           </div>
         </div>
-        <button id="disconnectBtn"
-          class="flex items-center gap-2 px-4 py-2 bg-indigo-700 hover:bg-indigo-800 rounded-md transition">
-          <i class="fa-solid fa-right-from-bracket text-white text-base" aria-hidden="true"></i>
-          Disconnect
-        </button>
+        <div class="flex items-center gap-2">
+          <button id="changePasswordBtn" title="Change password" aria-label="Change password"
+            class="flex items-center gap-2 px-4 py-2 bg-indigo-700 hover:bg-indigo-800 rounded-md transition">
+            <i class="fa-solid fa-key text-white text-base" aria-hidden="true"></i>
+            <span class="btn-label">Change password</span>
+          </button>
+          <button id="disconnectBtn" title="Disconnect" aria-label="Disconnect"
+            class="flex items-center gap-2 px-4 py-2 bg-indigo-700 hover:bg-indigo-800 rounded-md transition">
+            <i class="fa-solid fa-right-from-bracket text-white text-base" aria-hidden="true"></i>
+            <span class="btn-label">Disconnect</span>
+          </button>
+        </div>
       </div>
+    </div>
+
+    <!-- Change Password Dialog -->
+    <div id="passwordDialog" class="hidden fixed inset-0 flex items-center justify-center p-4 bg-gray-900 bg-opacity-50">
+      <form id="passwordForm" role="dialog" aria-modal="true" aria-labelledby="passwordDialogTitle" novalidate
+        class="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
+        <h2 id="passwordDialogTitle" class="text-lg font-semibold text-gray-800 flex items-center gap-2">
+          <i class="fa-solid fa-key text-indigo-600" aria-hidden="true"></i>
+          Change password
+        </h2>
+        <p class="text-sm text-gray-500 mt-1 mb-5">Use the new password next time you log in.</p>
+
+        <!-- Lets password managers know which account is being updated. -->
+        <input type="text" id="passwordUsername" autocomplete="username" class="hidden" tabindex="-1" aria-hidden="true">
+
+        <div class="space-y-4">
+          <div>
+            <label for="currentPassword" class="block text-sm font-medium text-gray-700 mb-1">Current password</label>
+            <input type="password" id="currentPassword" autocomplete="current-password"
+              class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500">
+          </div>
+          <div>
+            <label for="newPassword" class="block text-sm font-medium text-gray-700 mb-1">New password</label>
+            <input type="password" id="newPassword" autocomplete="new-password" aria-describedby="newPasswordHint"
+              class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <p id="newPasswordHint" class="text-xs text-gray-500 mt-1">At least 8 characters.</p>
+          </div>
+          <div>
+            <label for="confirmPassword" class="block text-sm font-medium text-gray-700 mb-1">Confirm new password</label>
+            <input type="password" id="confirmPassword" autocomplete="new-password"
+              class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500">
+          </div>
+        </div>
+
+        <p id="passwordError" role="alert"
+          class="hidden mt-4 p-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-md"></p>
+
+        <div class="mt-6 flex justify-end gap-3">
+          <button type="button" id="cancelPasswordBtn"
+            class="px-4 py-2 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300 transition">
+            Cancel
+          </button>
+          <button type="submit" id="savePasswordBtn"
+            class="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 transition font-medium">
+            Change password
+          </button>
+        </div>
+      </form>
     </div>
 
     <div class="max-w-7xl mx-auto p-6">

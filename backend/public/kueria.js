@@ -41,8 +41,21 @@ Object.assign(DOM, {
   disconnectBtn: document.getElementById('disconnectBtn'),
   createSchemaBtn: document.getElementById('createSchemaBtn'),
   refreshTablesBtn: document.getElementById('refreshTablesBtn'),
-  clearQueryBtn: document.getElementById('clearQueryBtn')
+  clearQueryBtn: document.getElementById('clearQueryBtn'),
+  changePasswordBtn: document.getElementById('changePasswordBtn'),
+  passwordDialog: document.getElementById('passwordDialog'),
+  passwordForm: document.getElementById('passwordForm'),
+  passwordUsername: document.getElementById('passwordUsername'),
+  currentPassword: document.getElementById('currentPassword'),
+  newPassword: document.getElementById('newPassword'),
+  confirmPassword: document.getElementById('confirmPassword'),
+  passwordError: document.getElementById('passwordError'),
+  cancelPasswordBtn: document.getElementById('cancelPasswordBtn'),
+  savePasswordBtn: document.getElementById('savePasswordBtn')
 });
+
+// Must match MIN_PASSWORD_LENGTH in password.js.
+const MIN_PASSWORD_LENGTH = 8;
 
 // Use the visible editor when available, keeping the textarea fallback in sync.
 const QueryEditor = {
@@ -70,9 +83,18 @@ const UI = {
         : 'bg-green-50 text-green-700 border border-green-200'
     }`;
     target.textContent = text;
+    target.dataset.type = type;
     target.classList.remove('hidden');
     clearTimeout(this.hideTimers.get(target));
-    this.hideTimers.set(target, setTimeout(() => target.classList.add('hidden'), 5000));
+    // Errors stay longer so they can be read while fixing the query.
+    const duration = type === 'error' ? 30000 : 5000;
+    this.hideTimers.set(target, setTimeout(() => target.classList.add('hidden'), duration));
+  },
+
+  dismissError(target = DOM.messageBanner) {
+    if (target.dataset.type !== 'error') return;
+    clearTimeout(this.hideTimers.get(target));
+    target.classList.add('hidden');
   },
 
   showLoginMessage(text, type) {
@@ -203,6 +225,62 @@ const ConnectionManager = {
     QueryEditor.setValue('');
     QueryEditor.codeMirror?.clearHistory();
     DOM.password.value = '';
+    PasswordDialog.close();
+  }
+};
+
+// === Password Change ===
+const PasswordDialog = {
+  isOpen() {
+    return !DOM.passwordDialog.classList.contains('hidden');
+  },
+
+  open() {
+    DOM.passwordForm.reset();
+    DOM.passwordUsername.value = state.credentials.username || '';
+    DOM.passwordError.classList.add('hidden');
+    DOM.passwordDialog.classList.remove('hidden');
+    DOM.currentPassword.focus();
+  },
+
+  close() {
+    DOM.passwordDialog.classList.add('hidden');
+    DOM.passwordForm.reset();
+  },
+
+  showError(text) {
+    DOM.passwordError.textContent = text;
+    DOM.passwordError.classList.remove('hidden');
+  },
+
+  async submit() {
+    const currentPassword = DOM.currentPassword.value;
+    const newPassword = DOM.newPassword.value;
+    if (!currentPassword || !newPassword || !DOM.confirmPassword.value)
+      return this.showError('Please fill in all fields.');
+    if (newPassword.length < MIN_PASSWORD_LENGTH)
+      return this.showError(`The new password needs at least ${MIN_PASSWORD_LENGTH} characters.`);
+    if (newPassword !== DOM.confirmPassword.value)
+      return this.showError('The new passwords do not match.');
+    if (newPassword === currentPassword)
+      return this.showError('The new password must be different from the current one.');
+
+    UI.toggleButtonLoading(DOM.savePasswordBtn, 'Changing...', true);
+    try {
+      const data = await apiFetch(`password/${sessionId}`, {
+        method: 'POST',
+        body: JSON.stringify({ currentPassword, newPassword })
+      });
+      // The session may have expired and closed the dialog meanwhile.
+      if (!this.isOpen()) return;
+      if (!data.success) return this.showError(data.error || 'Failed to change password');
+      this.close();
+      UI.showMessage('Password changed. Use the new password next time you connect.', 'success');
+    } catch (err) {
+      this.showError('Failed to change password: ' + err.message);
+    } finally {
+      UI.toggleButtonLoading(DOM.savePasswordBtn, 'Change password', false);
+    }
   }
 };
 
@@ -381,6 +459,8 @@ const QueryManager = {
         return;
       }
 
+      // A successful query makes any earlier error obsolete.
+      UI.dismissError();
       this.displayResults(data);
       await SchemaManager.loadSchemas();
     } catch (err) {
@@ -540,13 +620,24 @@ DOM.password?.addEventListener('keypress', e => e.key === 'Enter' && ConnectionM
 DOM.toggleBtn?.addEventListener('click', () => ResultsView.toggle());
 
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && DOM.resultsContainer.classList.contains('results-maximized')) {
+  if (e.key === 'Escape' && PasswordDialog.isOpen()) {
+    PasswordDialog.close();
+  } else if (e.key === 'Escape' && DOM.resultsContainer.classList.contains('results-maximized')) {
     ResultsView.set(false);
   }
 });
 
 DOM.connectBtn?.addEventListener("click", () => ConnectionManager.connect());
 DOM.disconnectBtn?.addEventListener("click", () => ConnectionManager.disconnect());
+DOM.changePasswordBtn?.addEventListener("click", () => PasswordDialog.open());
+DOM.cancelPasswordBtn?.addEventListener("click", () => PasswordDialog.close());
+// Clicking the backdrop closes the dialog, but not a text selection dragged out of it.
+let backdropPressed = false;
+DOM.passwordDialog?.addEventListener("mousedown", e => { backdropPressed = e.target === DOM.passwordDialog; });
+DOM.passwordDialog?.addEventListener("click", e => {
+  if (backdropPressed && e.target === DOM.passwordDialog) PasswordDialog.close();
+});
+DOM.passwordForm?.addEventListener("submit", e => { e.preventDefault(); PasswordDialog.submit(); });
 DOM.createSchemaBtn?.addEventListener("click", () => SchemaManager.createSchema());
 DOM.refreshTablesBtn?.addEventListener("click", () => TableManager.loadTables());
 DOM.executeBtn?.addEventListener("click", () => QueryManager.execute());

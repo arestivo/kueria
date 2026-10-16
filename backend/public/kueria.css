@@ -29,6 +29,14 @@ textarea { font-family: 'Courier New', monospace; }
 
 #loginMessage { margin-top: 1rem; }
 
+/* Above maximized results, below notices */
+#passwordDialog { z-index: 95; }
+
+/* Header buttons show only their icons on phones */
+@media (max-width: 639px) {
+	.btn-label { display: none; }
+}
+
 /* Prevent background content from scrolling when results are maximized */
 .no-scroll {
 	overflow: hidden;

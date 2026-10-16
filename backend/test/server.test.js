@@ -15,7 +15,7 @@ function deferred() {
 
 // Exercise the actual route and signal handlers without a database or listener.
 function createServer({ loginFailure, closeWait, connectWait, superuser, env = {} } = {}) {
-  const routes = new Map(), signals = new Map(), pools = [], exits = [], timers = [];
+  const routes = new Map(), signals = new Map(), pools = [], clients = [], exits = [], timers = [];
   const errors = [];
   let now = Date.now(), sweep, intervalCleared = false, httpCloseCount = 0;
   class Pool extends EventEmitter {
@@ -50,6 +50,21 @@ function createServer({ loginFailure, closeWait, connectWait, superuser, env = {
       if (this.endError) throw new Error('Pool close failed');
     }
   }
+  // Short-lived connections, used to change passwords.
+  class Client extends EventEmitter {
+    constructor(options) {
+      super();
+      this.options = options;
+      this.queries = [];
+      clients.push(this);
+    }
+    async connect() {
+      if (this.options.password !== 'password') throw Object.assign(new Error('Authentication failed'), { code: '28P01' });
+    }
+    async query(text) { this.queries.push(text); }
+    escapeLiteral(value) { return `'${value.replace(/'/g, "''")}'`; }
+    async end() { this.ended = true; }
+  }
   const app = {
     use() {},
     listen() {
@@ -70,9 +85,10 @@ function createServer({ loginFailure, closeWait, connectWait, superuser, env = {
     __dirname: path.join(__dirname, '..'), Date: Clock, Buffer,
     require(name) {
       if (name === 'express') return express;
-      if (name === 'pg') return { Pool };
+      if (name === 'pg') return { Client, Pool };
       if (name === 'dotenv') return { config() {} };
       if (name === './sql') return require('../sql');
+      if (name === './password') return require('../password');
       if (name === './query') return {
         runQuery: async (client, config, text) => [await client.query(text)], waitAfterError: async () => {}
       };
@@ -99,7 +115,7 @@ function createServer({ loginFailure, closeWait, connectWait, superuser, env = {
     return response;
   }
   return {
-    pools, exits, errors, timers, request,
+    pools, clients, exits, errors, timers, request,
     login: () => request('post /api/connect', { username: 'alice', password: 'password' }),
     signal: name => signals.get(name)(),
     advance(elapsed) { now += elapsed; },
@@ -161,6 +177,23 @@ test('logins reclaim quota from idle sessions before the sweeper runs', async ()
   server.advance(31 * 60 * 1000);
   assert((await server.login()).body.success);
   assert.deepEqual(server.pools.map(pool => pool.endCount), [1, 1, 0]);
+});
+
+test('password changes verify the current password and never send the new one in plaintext', async () => {
+  const server = createServer();
+  const { sessionId } = (await server.login()).body;
+  const change = body => server.request('post /api/password/:sessionId', body, { sessionId });
+  assert.equal((await change({ currentPassword: 'password', newPassword: 'short' })).statusCode, 400);
+  assert.equal((await change({ currentPassword: 'wrong', newPassword: 'new secret' })).statusCode, 403);
+  assert.equal(server.pools[0].options.password, 'password');
+  const response = await change({ currentPassword: 'password', newPassword: "new secret'" });
+  assert.equal(response.body.success, true);
+  const statement = server.clients.at(-1).queries[0];
+  assert.match(statement, /^ALTER ROLE CURRENT_USER PASSWORD 'SCRAM-SHA-256\$4096:[^']+'$/);
+  assert(!statement.includes('new secret'));
+  // Later query cancellations must authenticate with the new password.
+  assert.equal(server.pools[0].options.password, "new secret'");
+  assert(server.clients.every(client => client.ended));
 });
 
 test('successful login releases its client and handles idle pool errors', async () => {

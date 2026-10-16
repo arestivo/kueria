@@ -119,10 +119,11 @@ test('API validation errors remain visible without a PostgreSQL message', async 
 test('a newer message stays visible for its full duration', t => {
   const p = page(t);
   const timers = [];
-  p.window.setTimeout = callback => { timers.push({ callback }); return timers.length; };
+  p.window.setTimeout = (callback, delay) => { timers.push({ callback, delay }); return timers.length; };
   p.window.clearTimeout = id => { if (timers[id - 1]) timers[id - 1].cleared = true; };
   p.run("UI.showMessage('first', 'error'); UI.showMessage('second', 'success');");
   const banner = p.document.getElementById('messageBanner');
+  assert.deepEqual(timers.map(timer => timer.delay), [30000, 5000]);
   if (!timers[0].cleared) timers[0].callback();
   assert(!banner.classList.contains('hidden'));
   assert.equal(banner.textContent, 'second');
@@ -143,6 +144,89 @@ test('an expired session returns to the login screen', async t => {
   assert(!p.document.getElementById('loginScreen').classList.contains('hidden'));
   assert(p.document.getElementById('mainInterface').classList.contains('hidden'));
   assert.equal(p.document.getElementById('loginMessage').textContent, 'Session expired. Please reconnect.');
+});
+
+test('a successful query dismisses an earlier error but not a success message', async t => {
+  const p = page(t);
+  const banner = p.document.getElementById('messageBanner');
+  p.window.fetch = async url => ({ json: async () => url.includes('query/')
+    ? { success: true, executionTime: '1ms', results: [{ command: 'SELECT', columns: [], rows: [], rowCount: 1 }] }
+    : { success: true, schemas: ['public'], tables: [] } });
+  p.run("UI.showMessage('Query error: syntax error', 'error')");
+  await p.run("QueryManager._execute('SELECT 1')");
+  assert(banner.classList.contains('hidden'));
+  p.run("UI.showMessage('Schema created', 'success')");
+  await p.run("QueryManager._execute('SELECT 1')");
+  assert(!banner.classList.contains('hidden'));
+  assert.equal(banner.textContent, 'Schema created');
+});
+
+function passwordForm(p) {
+  const $ = id => p.document.getElementById(id);
+  return {
+    $,
+    fill(current, next, confirm) {
+      $('currentPassword').value = current;
+      $('newPassword').value = next;
+      $('confirmPassword').value = confirm;
+    },
+    submit: () => p.run('PasswordDialog.submit()')
+  };
+}
+
+test('the password dialog validates its fields before changing the password', async t => {
+  const p = page(t);
+  const { $, fill, submit } = passwordForm(p);
+  const requests = [];
+  p.window.fetch = async (url, options) => {
+    requests.push({ url, body: JSON.parse(options.body) });
+    return { status: 200, json: async () => ({ success: true }) };
+  };
+  p.run("sessionId = 'session'; ConnectionManager.showConnected('alice')");
+  $('changePasswordBtn').click();
+  assert(!$('passwordDialog').classList.contains('hidden'));
+  assert.equal($('passwordUsername').value, 'alice');
+
+  fill('old password', 'new password', 'new passwort');
+  await submit();
+  assert.equal($('passwordError').textContent, 'The new passwords do not match.');
+  fill('old password', 'short', 'short');
+  await submit();
+  assert.equal($('passwordError').textContent, 'The new password needs at least 8 characters.');
+  fill('same password', 'same password', 'same password');
+  await submit();
+  assert.equal($('passwordError').textContent, 'The new password must be different from the current one.');
+  assert.equal(requests.length, 0);
+
+  fill('old password', 'new password', 'new password');
+  await submit();
+  assert.deepEqual(requests, [{ url: 'api/password/session', body: { currentPassword: 'old password', newPassword: 'new password' } }]);
+  assert($('passwordDialog').classList.contains('hidden'));
+  assert.equal($('newPassword').value, '');
+  assert.equal($('messageBanner').textContent, 'Password changed. Use the new password next time you connect.');
+});
+
+test('the password dialog shows server errors and closes with Escape or the backdrop', async t => {
+  const p = page(t);
+  const { $, fill, submit } = passwordForm(p);
+  p.window.fetch = async () => ({ status: 403, json: async () => ({ success: false, error: 'The current password is incorrect.' }) });
+  p.run("sessionId = 'session'; ConnectionManager.showConnected('alice'); PasswordDialog.open()");
+  fill('wrong password', 'new password', 'new password');
+  await submit();
+  assert.equal($('passwordError').textContent, 'The current password is incorrect.');
+  assert(!$('passwordDialog').classList.contains('hidden'));
+  p.document.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Escape' }));
+  assert($('passwordDialog').classList.contains('hidden'));
+
+  p.run('PasswordDialog.open()');
+  assert($('passwordError').classList.contains('hidden'));
+  // A selection dragged from a field onto the backdrop keeps the dialog open.
+  $('currentPassword').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
+  $('passwordDialog').dispatchEvent(new p.window.MouseEvent('click', { bubbles: true }));
+  assert(!$('passwordDialog').classList.contains('hidden'));
+  $('passwordDialog').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
+  $('passwordDialog').dispatchEvent(new p.window.MouseEvent('click', { bubbles: true }));
+  assert($('passwordDialog').classList.contains('hidden'));
 });
 
 test('reload restores the saved session without another login', async t => {

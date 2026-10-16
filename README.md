@@ -99,6 +99,7 @@ All administrative tasks are performed using the provided shell scripts from you
     * **Query Editor (Right Panel)**: Write your SQL queries in the text area.
     * **Execute Query**: Click the "Execute Query" button to run your code.
     * **Results Panel**: The results of your query will appear at the bottom, displayed in a table.
+    * **Change Password**: The key button next to Disconnect asks for your current password and the new one twice. New passwords need at least 8 characters; you stay connected after changing it.
 
 ---
 
