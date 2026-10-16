@@ -1,19 +1,9 @@
 #!/bin/bash
-# Usage: ./sql-student.sh student
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-docker exec -it keria_postgres psql -U $STUDENT -d ${STUDENT}
-STUDENT=$1
-
-if [ -z "$STUDENT" ]; then
-  echo "Usage: $0 <student_name>"
+if [[ $# != 1 ]]; then
+  echo "Usage: $0 <student_name>" >&2
   exit 1
 fi
-
-# Validate username
-if ! [[ "$STUDENT" =~ ^[a-z_][a-z0-9_]*$ ]]; then
-  echo "Invalid student username: $STUDENT"
-  exit 1
-fi
-
-# Connect to the student's database as themselves
-docker exec -it keria_postgres psql -U "${STUDENT}" -d "${STUDENT}"
+validate_student "$1"
+exec docker exec -it "$POSTGRES_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U "$1" -d "$1"

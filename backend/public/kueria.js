@@ -1,5 +1,6 @@
 // === Constants ===
 const API_URL = 'api';
+const SESSION_STORAGE_KEY = 'keria.session';
 let sessionId = null;
 
 // === State ===
@@ -27,7 +28,7 @@ const DOM = {
   schemaList: document.getElementById('schemaList'),
   tablesList: document.getElementById('tablesList'),
   currentSchema: document.getElementById('currentSchema'),
-  resultsTable: document.getElementById('resultsTable'),
+  statementResults: document.getElementById('statementResults'),
   resultsInfo: document.getElementById('resultsInfo'),
   username: document.getElementById('username'),
   password: document.getElementById('password'),
@@ -40,9 +41,22 @@ Object.assign(DOM, {
   disconnectBtn: document.getElementById('disconnectBtn'),
   createSchemaBtn: document.getElementById('createSchemaBtn'),
   refreshTablesBtn: document.getElementById('refreshTablesBtn'),
-  clearQueryBtn: document.getElementById('clearQueryBtn'),
-  resultsToggle: document.getElementById('resultsToggle')
+  clearQueryBtn: document.getElementById('clearQueryBtn')
 });
+
+// Use the visible editor when available, keeping the textarea fallback in sync.
+const QueryEditor = {
+  codeMirror: null,
+
+  getValue() {
+    return this.codeMirror ? this.codeMirror.getValue() : DOM.queryEditor.value;
+  },
+
+  setValue(value) {
+    if (this.codeMirror) this.codeMirror.setValue(value);
+    DOM.queryEditor.value = value;
+  }
+};
 
 // === Utility Helpers ===
 const UI = {
@@ -71,12 +85,6 @@ const UI = {
       btn.innerHTML = btn.dataset.originalText || btn.innerHTML;
       btn.disabled = false;
     }
-  },
-
-  escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
   }
 };
 
@@ -95,9 +103,40 @@ async function apiFetch(path, options = {}) {
 
 // === Connection Management ===
 const ConnectionManager = {
+  showConnected(username) {
+    state.connected = true;
+    state.credentials = { username };
+    DOM.password.value = '';
+    DOM.loginScreen.classList.add('hidden');
+    DOM.mainInterface.classList.remove('hidden');
+    QueryEditor.codeMirror?.refresh();
+    DOM.connectionInfo.textContent = `${username}@postgres/${username}`;
+  },
+
+  async restore() {
+    let saved;
+    try { saved = sessionStorage.getItem(SESSION_STORAGE_KEY); } catch { return; }
+    if (!saved) return;
+    UI.toggleButtonLoading(DOM.connectBtn, 'Connecting...', true);
+    try {
+      const data = await apiFetch(`session/${encodeURIComponent(saved)}`);
+      if (!data.success) {
+        sessionStorage.removeItem(SESSION_STORAGE_KEY);
+        return;
+      }
+      sessionId = saved;
+      this.showConnected(data.username);
+      await SchemaManager.loadSchemas();
+    } catch (err) {
+      UI.showLoginMessage('Could not restore connection: ' + err.message, 'error');
+    } finally {
+      UI.toggleButtonLoading(DOM.connectBtn, 'Connect', false);
+    }
+  },
+
   async connect() {
     const username = DOM.username.value.trim();
-    const password = DOM.password.value.trim();
+    const password = DOM.password.value;
 
     if (!username || !password)
       return UI.showLoginMessage('Please fill in username and password', 'error');
@@ -114,12 +153,8 @@ const ConnectionManager = {
         return UI.showLoginMessage(data.error || 'Connection failed', 'error');
 
       sessionId = data.sessionId;
-      state.connected = true;
-      state.credentials = { username };
-
-      DOM.loginScreen.classList.add('hidden');
-      DOM.mainInterface.classList.remove('hidden');
-      DOM.connectionInfo.textContent = `${username}@postgres/${username}`;
+      try { sessionStorage.setItem(SESSION_STORAGE_KEY, sessionId); } catch {}
+      this.showConnected(username);
 
       await SchemaManager.loadSchemas();
       UI.showMessage('Connected successfully!', 'success');
@@ -143,12 +178,17 @@ const ConnectionManager = {
     }
 
     sessionId = null;
-    Object.assign(state, { connected: false, schemas: [], selectedSchema: 'public' });
+    try { sessionStorage.removeItem(SESSION_STORAGE_KEY); } catch {}
+    Object.assign(state, { connected: false, credentials: {}, schemas: [], tables: [], selectedSchema: 'public' });
+    ResultsView.set(false);
+    DOM.statementResults.replaceChildren();
+    DOM.currentSchema.textContent = 'public';
 
     DOM.mainInterface.classList.add('hidden');
     DOM.loginScreen.classList.remove('hidden');
     DOM.resultsContainer.classList.add('hidden');
-    DOM.queryEditor.value = '';
+    QueryEditor.setValue('');
+    QueryEditor.codeMirror?.clearHistory();
     DOM.password.value = '';
   }
 };
@@ -156,11 +196,17 @@ const ConnectionManager = {
 // === Schema Management ===
 const SchemaManager = {
   async loadSchemas() {
+    const requestedSession = sessionId;
     try {
-      const data = await apiFetch(`schemas/${sessionId}`);
+      const data = await apiFetch(`schemas/${requestedSession}`);
+      if (requestedSession !== sessionId) return;
       if (!data.success) throw new Error(data.error);
 
       state.schemas = data.schemas;
+      if (!state.schemas.includes(state.selectedSchema)) {
+        state.selectedSchema = state.schemas.includes('public') ? 'public' : state.schemas[0] || 'public';
+        DOM.currentSchema.textContent = state.selectedSchema;
+      }
       this.renderSchemas();
       await TableManager.loadTables();
     } catch (err) {
@@ -191,7 +237,7 @@ const SchemaManager = {
   async deleteSchema(schema) {
     if (!confirm(`Delete schema "${schema}"? This cannot be undone.`)) return;
     try {
-      const data = await apiFetch(`schemas/${sessionId}/${schema}`, { method: 'DELETE' });
+      const data = await apiFetch(`schemas/${sessionId}/${encodeURIComponent(schema)}`, { method: 'DELETE' });
       if (!data.success) throw new Error(data.error);
 
       await this.loadSchemas();
@@ -203,19 +249,29 @@ const SchemaManager = {
   },
 
   renderSchemas() {
-    DOM.schemaList.innerHTML = state.schemas.map(schema => `
-      <div class="schema-item flex items-center justify-between p-2 rounded-md cursor-pointer transition ${
+    const items = state.schemas.map(schema => {
+      const item = document.createElement('div');
+      item.className = `schema-item flex items-center justify-between p-2 rounded-md cursor-pointer transition ${
         state.selectedSchema === schema
           ? 'bg-indigo-50 border-2 border-indigo-500'
           : 'bg-gray-50 hover:bg-gray-100 border-2 border-transparent'
-      }" onclick="SchemaManager.selectSchema('${schema}')">
-        <span class="text-sm font-medium">${schema}</span>
-        ${!['public','pg_catalog','information_schema'].includes(schema)
-          ? `<button onclick="event.stopPropagation(); SchemaManager.deleteSchema('${schema}')"
-               class="p-1 text-red-600 hover:bg-red-50 rounded text-xl leading-none" title="Delete schema">×</button>`
-          : ''}
-      </div>
-    `).join('');
+      }`;
+      const select = document.createElement('button');
+      select.className = 'text-sm font-medium text-left flex-1';
+      select.textContent = schema;
+      select.addEventListener('click', () => this.selectSchema(schema));
+      item.append(select);
+      if (!['public', 'pg_catalog', 'information_schema'].includes(schema)) {
+        const remove = document.createElement('button');
+        remove.className = 'p-1 text-red-600 hover:bg-red-50 rounded text-xl leading-none';
+        remove.title = 'Delete schema';
+        remove.textContent = '×';
+        remove.addEventListener('click', () => this.deleteSchema(schema));
+        item.append(remove);
+      }
+      return item;
+    });
+    DOM.schemaList.replaceChildren(...items);
   },
 
   selectSchema(schema) {
@@ -229,8 +285,11 @@ const SchemaManager = {
 // === Table Management ===
 const TableManager = {
   async loadTables() {
+    const requestedSession = sessionId;
+    const requestedSchema = state.selectedSchema;
     try {
-      const data = await apiFetch(`tables/${sessionId}/${state.selectedSchema}`);
+      const data = await apiFetch(`tables/${requestedSession}/${encodeURIComponent(requestedSchema)}`);
+      if (requestedSession !== sessionId || requestedSchema !== state.selectedSchema) return;
       if (!data.success) throw new Error(data.error);
 
       state.tables = data.tables;
@@ -241,20 +300,28 @@ const TableManager = {
   },
 
   renderTables() {
-    if (!state.tables.length)
-      return (DOM.tablesList.innerHTML =
-        '<p class="text-sm text-gray-500 text-center py-4">No tables</p>');
-
-    DOM.tablesList.innerHTML = state.tables.map(t => `
-      <button onclick="TableManager.selectTable('${t.table_name}')"
-        class="w-full text-left text-xs px-3 py-2 bg-gray-50 hover:bg-indigo-50 rounded-md transition flex items-center justify-between group">
-        <span class="font-medium text-gray-700">${t.table_name}</span>
-        <span class="text-gray-400 text-xs">${t.column_count} cols</span>
-      </button>`).join('');
+    if (!state.tables.length) {
+      DOM.tablesList.innerHTML = '<p class="text-sm text-gray-500 text-center py-4">No tables</p>';
+      return;
+    }
+    DOM.tablesList.replaceChildren(...state.tables.map(table => {
+      const button = document.createElement('button');
+      button.className = 'w-full text-left text-xs px-3 py-2 bg-gray-50 hover:bg-indigo-50 rounded-md transition flex items-center justify-between';
+      const name = document.createElement('span');
+      name.className = 'font-medium text-gray-700';
+      name.textContent = table.table_name;
+      const count = document.createElement('span');
+      count.className = 'text-gray-400 text-xs';
+      count.textContent = `${table.column_count} cols`;
+      button.append(name, count);
+      button.addEventListener('click', () => this.selectTable(table.table_name));
+      return button;
+    }));
   },
 
   async selectTable(name) {
-    const query = `SELECT * FROM ${state.selectedSchema}.${name} LIMIT 100;`;
+    const quote = identifier => '"' + identifier.replace(/"/g, '""') + '"';
+    const query = `SELECT * FROM ${quote(state.selectedSchema)}.${quote(name)} LIMIT 100;`;
     await QueryManager.executeDirect(query);
   }
 };
@@ -262,8 +329,8 @@ const TableManager = {
 // === Query Management ===
 const QueryManager = {
   async execute() {
-    const query = DOM.queryEditor.value.trim();
-    if (!query) return UI.showMessage('Query cannot be empty', 'error');
+    const query = QueryEditor.getValue();
+    if (!query.trim()) return UI.showMessage('Query cannot be empty', 'error');
     await this._execute(query);
   },
 
@@ -272,45 +339,42 @@ const QueryManager = {
   },
 
   async _execute(query, silent = false) {
+    if (DOM.executeBtn.disabled) return;
+    const requestedSession = sessionId;
     UI.toggleButtonLoading(DOM.executeBtn, 'Executing...', true);
 
     try {
-      const data = await apiFetch(`query/${sessionId}`, {
+      const data = await apiFetch(`query/${requestedSession}`, {
         method: 'POST',
         body: JSON.stringify({ query, schema: state.selectedSchema })
       });
+      if (requestedSession !== sessionId) return;
 
       // Assume server returns structured JSON; if success=false, render server-provided error fields
       if (!data.success) {
         // Consolidate error display into the top banner. Include message, detail and hint (but hide code/position).
         const pieces = [];
-        if (data.message) pieces.push(data.message);
+        pieces.push(data.message || data.error || 'Query failed');
         if (data.detail) pieces.push(data.detail);
         if (data.hint) pieces.push('Hint: ' + data.hint);
         if (data.timeout) pieces.push('(timeout)');
 
         UI.showMessage('Query error: ' + pieces.join(' — '), 'error');
         // Hide results panel; do not duplicate details there
+        ResultsView.set(false);
         DOM.resultsContainer.classList.add('hidden');
         // If a position was provided, still move the caret silently
-        if (data.position && DOM.queryEditor) {
-          const posNum = parseInt(data.position, 10);
-          if (!Number.isNaN(posNum) && posNum > 0) setQueryEditorCaret(posNum - 1);
-        }
+        if (!silent && QueryEditor.getValue() === query) renderQueryErrorDetails(data);
         return;
       }
 
-      if (data.columns?.length) {
-        this.displayResults(data);
-      } else {
-        DOM.resultsContainer.classList.add('hidden');
-        UI.showMessage(`${data.command} completed successfully. ${data.rowCount ?? 0} row(s) affected. Time: ${data.executionTime}`, 'success');
-      }
-      await TableManager.loadTables();
+      this.displayResults(data);
+      await SchemaManager.loadSchemas();
     } catch (err) {
       // Network or unexpected error
       console.error('Query request failed:', err);
       UI.showMessage('Query error: ' + (err.message || String(err)), 'error');
+      ResultsView.set(false);
       DOM.resultsContainer.classList.add('hidden');
     } finally {
       UI.toggleButtonLoading(DOM.executeBtn, 'Execute', false);
@@ -318,32 +382,63 @@ const QueryManager = {
   },
 
   displayResults(data) {
-    const cols = (data.columns || []).map(c => ({
-      name: c.name,
-      type: c.type || null,
-      dataTypeID: c.dataTypeID || null
+    const results = data.results || [];
+    DOM.statementResults.replaceChildren(...results.map((result, statementIndex) => {
+      const section = document.createElement('section');
+      section.className = 'mb-6';
+      const summary = document.createElement('p');
+      summary.className = 'font-medium text-gray-700 mb-2';
+      summary.textContent = `${statementIndex + 1}. ${result.command || 'Statement'} — ${result.rowCount ?? 0} ${result.columns.length ? 'rows' : 'rows affected'}`;
+      section.append(summary);
+      if (result.truncated) {
+        const notice = document.createElement('p');
+        notice.className = 'text-sm text-yellow-700 mb-2';
+        notice.textContent = `Showing ${result.rows.length} of ${result.rowCount} rows (display limit reached).`;
+        section.append(notice);
+      }
+      if (!result.columns.length) return section;
+      const table = document.createElement('table');
+      table.className = 'w-full text-sm';
+      const head = document.createElement('thead');
+      const headings = document.createElement('tr');
+      headings.className = 'bg-gray-50 border-b';
+      result.columns.forEach(column => {
+        const cell = document.createElement('th');
+        cell.className = 'px-4 py-3 text-left font-semibold text-gray-700';
+        cell.title = column.type || String(column.dataTypeID || '');
+        cell.textContent = column.name;
+        headings.append(cell);
+      });
+      head.append(headings);
+      const body = document.createElement('tbody');
+      result.rows.forEach(row => {
+        const tr = document.createElement('tr');
+        tr.className = 'border-b hover:bg-gray-50';
+        result.columns.forEach((column, index) => {
+          const cell = document.createElement('td');
+          cell.className = 'px-4 py-3 text-gray-600';
+          const value = row[index];
+          cell.textContent = value == null ? 'NULL' : typeof value === 'object' ? JSON.stringify(value) : String(value);
+          if (value == null) cell.classList.add('italic', 'text-gray-400');
+          tr.append(cell);
+        });
+        body.append(tr);
+      });
+      if (!result.rows.length) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = result.columns.length;
+        cell.className = 'px-4 py-3 text-gray-500 italic';
+        cell.textContent = 'No rows';
+        row.append(cell);
+        body.append(row);
+      }
+      table.append(head, body);
+      section.append(table);
+      return section;
     }));
-
-    const headerHTML = cols
-      .map(c => `<th class="px-4 py-3 text-left font-semibold text-gray-700" 
-        title="${UI.escapeHtml(c.type || String(c.dataTypeID) || '')}">
-        ${UI.escapeHtml(c.name)}</th>`)
-      .join('');
-
-    const rowsHTML = (data.rows || [])
-      .map(row => `
-        <tr class="border-b hover:bg-gray-50">
-          ${cols.map(c => {
-            const val = row[c.name];
-            return `<td class="px-4 py-3 text-gray-600">${
-              val != null ? UI.escapeHtml(String(val)) : '<i class="text-gray-400">NULL</i>'
-            }</td>`;
-          }).join('')}
-        </tr>`).join('') || 
-      `<tr><td class="px-4 py-3 text-gray-500 italic" colspan="${cols.length || 1}">No rows</td></tr>`;
-
-    DOM.resultsInfo.textContent = `${data.rowCount} rows • ${data.executionTime}`;
-    DOM.resultsTable.innerHTML = `<thead><tr class="bg-gray-50 border-b">${headerHTML}</tr></thead><tbody>${rowsHTML}</tbody>`;
+    const transaction = data.transactionStatus === 'T' ? ' • transaction open' : '';
+    DOM.resultsInfo.textContent = `${results.length} statement(s) • ${data.executionTime}${transaction}`;
     DOM.resultsContainer.classList.remove('hidden');
   }
 };
@@ -357,13 +452,21 @@ function renderQueryErrorDetails(err) {
   }
 }
 
-// Set the caret position in the query editor (character index). If index out of range, place at end.
+// PostgreSQL positions count characters; editor offsets count UTF-16 code units.
 function setQueryEditorCaret(index) {
   try {
     const el = DOM.queryEditor;
     if (!el) return;
-    const text = el.value || '';
-    const idx = Math.max(0, Math.min(index, text.length));
+    const text = QueryEditor.getValue();
+    const idx = Array.from(text).slice(0, Math.max(0, index)).join('').length;
+    const editor = QueryEditor.codeMirror;
+    if (editor) {
+      const position = editor.posFromIndex(idx);
+      editor.setCursor(position);
+      editor.scrollIntoView(position);
+      editor.focus();
+      return;
+    }
     el.focus();
     // For modern browsers, set selection range
     if (typeof el.setSelectionRange === 'function') {
@@ -434,7 +537,7 @@ DOM.disconnectBtn?.addEventListener("click", () => ConnectionManager.disconnect(
 DOM.createSchemaBtn?.addEventListener("click", () => SchemaManager.createSchema());
 DOM.refreshTablesBtn?.addEventListener("click", () => TableManager.loadTables());
 DOM.executeBtn?.addEventListener("click", () => QueryManager.execute());
-DOM.clearQueryBtn?.addEventListener("click", () => { if (DOM.queryEditor) DOM.queryEditor.value = ""; });
+DOM.clearQueryBtn?.addEventListener("click", () => QueryEditor.setValue(''));
 
 DOM.queryEditor?.addEventListener("keydown", (e) => { if (e.ctrlKey && e.key === "Enter") QueryManager.execute();});
-DOM.resultsToggle?.addEventListener("click", () => ResultsView.toggle());
+ConnectionManager.restore();

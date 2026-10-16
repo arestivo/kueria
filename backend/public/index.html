@@ -7,7 +7,11 @@
   <link href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet">
   <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
   <link href="kueria.css" rel="stylesheet"> 
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.7/codemirror.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.7/codemirror.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.7/mode/sql/sql.min.js"></script>
   <script src="kueria.js" defer></script>
+  <script src="cm-init.js" defer></script>
 </head>
 <body class="bg-gray-50">
   
@@ -24,13 +28,13 @@
         
         <div class="space-y-4">
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Username *</label>
+            <label for="username" class="block text-sm font-medium text-gray-700 mb-1">Username *</label>
             <input type="text" id="username"
               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500">
           </div>
           
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Password *</label>
+            <label for="password" class="block text-sm font-medium text-gray-700 mb-1">Password *</label>
             <input type="password" id="password"
               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500">
           </div>
@@ -150,7 +154,7 @@
             </div>
 
             <div class="overflow-x-auto">
-              <table class="w-full text-sm" id="resultsTable"></table>
+              <div id="statementResults"></div>
             </div>
           </div>
         </div>

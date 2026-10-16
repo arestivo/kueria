@@ -1,4 +1,7 @@
 #!/bin/bash
-# Usage: ./list-students.sh
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-docker exec -i keria_postgres psql -U postgres -d postgres -c "\du"
+admin_psql -c "SELECT r.rolname AS student, d.datname AS database
+FROM pg_roles r JOIN pg_database d ON d.datdba = r.oid AND d.datname = r.rolname
+WHERE r.rolcanlogin AND NOT r.rolsuper AND NOT r.rolcreatedb AND NOT r.rolcreaterole
+ORDER BY r.rolname"

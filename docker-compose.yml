@@ -8,6 +8,11 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - app_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
 
   app:
     build: ./backend
@@ -15,14 +20,19 @@ services:
     ports:
       - "${APP_PORT:-3000}:3000"
     environment:
-      NODE_ENV: ${NODE_ENV:-development}
+      NODE_ENV: ${NODE_ENV:-production}
+      MAX_SESSIONS: ${MAX_SESSIONS:-40}
+      MAX_SESSIONS_PER_USER: ${MAX_SESSIONS_PER_USER:-2}
+      MAX_RESULT_ROWS: ${MAX_RESULT_ROWS:-1000}
+      MAX_RESULT_BYTES: ${MAX_RESULT_BYTES:-1048576}
+      MAX_SQL_BYTES: ${MAX_SQL_BYTES:-65536}
+      MAX_STATEMENTS: ${MAX_STATEMENTS:-100}
+      QUERY_TIMEOUT_MS: ${QUERY_TIMEOUT_MS:-10000}
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     networks:
       - app_network
-    volumes:
-      - ./backend:/app
-      - /app/node_modules
     restart: unless-stopped
 
 networks:

@@ -1,25 +1,17 @@
 #!/bin/bash
-# Usage: ./delete-student.sh student
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-STUDENT=$1
-
-if [ -z "$STUDENT" ]; then
-  echo "Usage: $0 <student_name>"
+if [[ $# != 1 ]]; then
+  echo "Usage: $0 <student_name>" >&2
   exit 1
 fi
+validate_student "$1"
+check_student_ownership "$1"
 
-# Validate username
-if ! [[ "$STUDENT" =~ ^[a-z_][a-z0-9_]*$ ]]; then
-  echo "Invalid student username: $STUDENT"
-  exit 1
-fi
-
-# Drop the student's database if it exists
-docker exec -i keria_postgres psql -U postgres -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${STUDENT}'" | grep -q 1 && docker exec -i keria_postgres psql -U postgres -d postgres <<SQL
-DROP DATABASE IF EXISTS "${STUDENT}";
-SQL
-
-# Drop the user if it exists
-docker exec -i keria_postgres psql -U postgres -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='${STUDENT}'" | grep -q 1 && docker exec -i keria_postgres psql -U postgres -d postgres <<SQL
-DROP USER IF EXISTS "${STUDENT}";
+# A failed database drop stops before DROP ROLE; FORCE disconnects active users.
+admin_psql --set=student="$1" <<'SQL'
+SELECT format('DROP DATABASE IF EXISTS %I WITH (FORCE)', :'student')
+\gexec
+SELECT format('DROP ROLE IF EXISTS %I', :'student')
+\gexec
 SQL

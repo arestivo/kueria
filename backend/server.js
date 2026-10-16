@@ -4,9 +4,11 @@ const express = require('express');
 const { Pool } = require('pg');
 const path = require('path');
 const crypto = require('crypto');
+const { countStatements, isValidIdentifier, quoteIdentifier } = require('./sql');
+const { runQuery, waitAfterError } = require('./query');
 const app = express();
 
-app.use(express.json());
+app.use(express.json({ limit: '256kb' }));
 
 // Serve static files from the public directory
 app.use(express.static(path.join(__dirname, 'public')));
@@ -14,12 +16,75 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Store active connections per session
 // connections: Map<sessionId, { pool, username, createdAt, expiresAt }>
 const connections = new Map();
+const closingPools = new Set();
+const pendingLogins = new Map();
+
+function positiveInteger(name, fallback) {
+  const value = Number(process.env[name] || fallback);
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`Invalid ${name}`);
+  return value;
+}
+
+const MAX_SESSIONS = positiveInteger('MAX_SESSIONS', 40);
+const MAX_SESSIONS_PER_USER = positiveInteger('MAX_SESSIONS_PER_USER', 2);
+const MAX_SQL_BYTES = positiveInteger('MAX_SQL_BYTES', 65536);
+const MAX_STATEMENTS = positiveInteger('MAX_STATEMENTS', 100);
+const QUERY_LIMITS = {
+  rows: positiveInteger('MAX_RESULT_ROWS', 1000),
+  bytes: positiveInteger('MAX_RESULT_BYTES', 1048576),
+  timeout: positiveInteger('QUERY_TIMEOUT_MS', 10000)
+};
+
+function closePool(pool) {
+  const closing = (async () => {
+    try {
+      await pool.end();
+    } catch (error) {
+      console.error('Error closing pool:', error);
+    }
+  })();
+  closingPools.add(closing);
+  closing.then(() => closingPools.delete(closing));
+  return closing;
+}
+
+function closeSession(sessionId) {
+  const session = connections.get(sessionId);
+  if (!session) return Promise.resolve();
+
+  // Remove it before awaiting cleanup so it cannot be used or closed twice.
+  connections.delete(sessionId);
+  return closePool(session.pool);
+}
+
+async function sessionQuery(session, text, values) {
+  const client = await session.pool.connect();
+  try {
+    return await client.query(text, values);
+  } catch (error) {
+    await waitAfterError(client);
+    throw error;
+  } finally {
+    // pool.query destroys clients on SQL errors, which would lose transactions.
+    client.release();
+  }
+}
 
 // Session lifetime (ms)
 const SESSION_TTL = 1000 * 60 * 60; // 1 hour
 
-function isValidIdentifier(name) {
-  return typeof name === 'string' && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name);
+function getSession(req, res, allowBusy = false) {
+  const session = connections.get(req.params.sessionId);
+  if (!session || session.expiresAt < Date.now()) {
+    if (session) void closeSession(req.params.sessionId);
+    res.status(401).json({ success: false, error: 'Session expired. Please reconnect.' });
+    return null;
+  }
+  if (session.busy && !allowBusy) {
+    res.status(409).json({ success: false, error: 'A query is already running. Please wait.' });
+    return null;
+  }
+  return session;
 }
 
 const TYPE_FRIENDLY = {
@@ -58,39 +123,63 @@ app.get('/api/health', (req, res) => {
 
 // Connect endpoint
 app.post('/api/connect', async (req, res) => {
-  const { username, password } = req.body;
+  const { username, password } = req.body || {};
   
-  if (!username || !password) {
+  if (typeof username !== 'string' || typeof password !== 'string' || !username || !password) {
     return res.status(400).json({ 
       success: false, 
       error: 'Username and password are required' 
     });
   }
   
+  const pendingCount = [...pendingLogins.values()].reduce((sum, count) => sum + count, 0);
+  const userCount = [...connections.values()].filter(session => session.username === username).length;
+  if (connections.size + closingPools.size + pendingCount >= MAX_SESSIONS ||
+      userCount + (pendingLogins.get(username) || 0) >= MAX_SESSIONS_PER_USER) {
+    return res.status(429).json({ success: false, error: 'Connection limit reached. Disconnect an unused session and try again.' });
+  }
+  pendingLogins.set(username, (pendingLogins.get(username) || 0) + 1);
+  const sessionId = crypto.randomBytes(32).toString('hex');
+  let pool;
   try {
-    const pool = new Pool({
-      host: 'postgres',
-      port: 5432,
+    const config = {
+      host: process.env.PGHOST || 'postgres',
+      port: positiveInteger('PGPORT', 5432),
       database: username,
       user: username,
       password,
-      max: 10,
-      idleTimeoutMillis: 30000,
+      // Keep one physical connection so transactions and session settings persist.
+      max: 1,
+      idleTimeoutMillis: 0,
       connectionTimeoutMillis: 5000,
+      statement_timeout: QUERY_LIMITS.timeout,
+      idle_in_transaction_session_timeout: 120000,
+      application_name: 'keria'
+    };
+    pool = new Pool(config);
+    pool.on('error', (error) => {
+      console.error('Idle database connection error:', error);
+      void closeSession(sessionId);
+    });
+    pool.on('connect', client => {
+      client.on('error', error => {
+        console.error('Database connection error:', error);
+        void closeSession(sessionId);
+      });
+      client.on('end', () => { void closeSession(sessionId); });
     });
 
     // Test connection
     const client = await pool.connect();
-    // enforce reasonable timeouts for student queries on this session
-    await client.query('SET statement_timeout = 10000'); // 10s
-    await client.query('SET idle_in_transaction_session_timeout = 20000');
-    await client.query('SELECT NOW()');
-    client.release();
+    try {
+      await client.query('SELECT NOW()');
+    } finally {
+      client.release();
+    }
 
     // Generate session ID
-    const sessionId = crypto.randomBytes(32).toString('hex');
     const now = Date.now();
-    connections.set(sessionId, { pool, username, createdAt: now, expiresAt: now + SESSION_TTL });
+    connections.set(sessionId, { pool, config, username, busy: false, createdAt: now, expiresAt: now + SESSION_TTL });
 
     res.json({ 
       success: true, 
@@ -99,32 +188,36 @@ app.post('/api/connect', async (req, res) => {
     });
   } catch (error) {
     console.error('Connection error:', error);
+    if (pool) await closePool(pool);
     res.status(400).json({ success: false, error: 'Connection failed' });
+  } finally {
+    const remaining = pendingLogins.get(username) - 1;
+    if (remaining) pendingLogins.set(username, remaining);
+    else pendingLogins.delete(username);
   }
 });
 
 // Disconnect endpoint
 app.post('/api/disconnect', async (req, res) => {
-  const { sessionId } = req.body;
-  const session = connections.get(sessionId);
-
-  if (session && session.pool) {
-    try { await session.pool.end(); } catch (e) { console.error('Error closing pool:', e); }
-    connections.delete(sessionId);
-  }
+  const { sessionId } = req.body || {};
+  await closeSession(sessionId);
 
   res.json({ success: true });
 });
 
+// Let a reloaded tab reuse its connection instead of consuming another slot.
+app.get('/api/session/:sessionId', (req, res) => {
+  const session = getSession(req, res, true);
+  if (session) res.json({ success: true, username: session.username });
+});
+
 // Get schemas
 app.get('/api/schemas/:sessionId', async (req, res) => {
-  const session = connections.get(req.params.sessionId);
-  if (!session || !session.pool || session.expiresAt < Date.now()) {
-    return res.status(401).json({ error: 'Not connected' });
-  }
+  const session = getSession(req, res);
+  if (!session) return;
 
   try {
-    const result = await session.pool.query(`
+    const result = await sessionQuery(session, `
       SELECT schema_name 
       FROM information_schema.schemata 
       WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
@@ -140,18 +233,16 @@ app.get('/api/schemas/:sessionId', async (req, res) => {
 
 // Get tables for a schema
 app.get('/api/tables/:sessionId/:schemaName', async (req, res) => {
-  const session = connections.get(req.params.sessionId);
+  const session = getSession(req, res);
+  if (!session) return;
   const { schemaName } = req.params;
-  if (!session || !session.pool || session.expiresAt < Date.now()) {
-    return res.status(401).json({ error: 'Not connected' });
-  }
 
   if (!isValidIdentifier(schemaName)) {
     return res.status(400).json({ success: false, error: 'Invalid schema name' });
   }
 
   try {
-    const result = await session.pool.query(`
+    const result = await sessionQuery(session, `
       SELECT 
         table_name,
         (SELECT COUNT(*) 
@@ -172,19 +263,17 @@ app.get('/api/tables/:sessionId/:schemaName', async (req, res) => {
 
 // Create schema
 app.post('/api/schemas/:sessionId', async (req, res) => {
-  const session = connections.get(req.params.sessionId);
-  const { schemaName } = req.body;
-  if (!session || !session.pool || session.expiresAt < Date.now()) {
-    return res.status(401).json({ error: 'Not connected' });
-  }
+  const session = getSession(req, res);
+  if (!session) return;
+  const { schemaName } = req.body || {};
 
   try {
-    // Sanitize schema name (only allow alphanumeric and underscore)
+    // Quote valid PostgreSQL identifiers, including spaces and mixed case.
     if (!isValidIdentifier(schemaName)) {
-      return res.status(400).json({ success: false, error: 'Invalid schema name. Use only letters, numbers, and underscores.' });
+      return res.status(400).json({ success: false, error: 'Invalid schema name. Use 1–63 bytes without null characters.' });
     }
 
-    await session.pool.query(`CREATE SCHEMA "${schemaName}"`);
+    await sessionQuery(session, `CREATE SCHEMA ${quoteIdentifier(schemaName)}`);
     
     res.json({ success: true, message: `Schema "${schemaName}" created` });
   } catch (error) {
@@ -195,11 +284,9 @@ app.post('/api/schemas/:sessionId', async (req, res) => {
 
 // Delete schema
 app.delete('/api/schemas/:sessionId/:schemaName', async (req, res) => {
-  const session = connections.get(req.params.sessionId);
+  const session = getSession(req, res);
+  if (!session) return;
   const { schemaName } = req.params;
-  if (!session || !session.pool || session.expiresAt < Date.now()) {
-    return res.status(401).json({ error: 'Not connected' });
-  }
 
   try {
     // Prevent deleting system schemas
@@ -211,7 +298,7 @@ app.delete('/api/schemas/:sessionId/:schemaName', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid schema name' });
     }
 
-    await session.pool.query(`DROP SCHEMA "${schemaName}" CASCADE`);
+    await sessionQuery(session, `DROP SCHEMA ${quoteIdentifier(schemaName)} CASCADE`);
     
     res.json({ success: true, message: `Schema "${schemaName}" deleted` });
   } catch (error) {
@@ -220,149 +307,129 @@ app.delete('/api/schemas/:sessionId/:schemaName', async (req, res) => {
   }
 });
 
-// Execute query
+// Execute a script on the session's single persistent connection.
 app.post('/api/query/:sessionId', async (req, res) => {
-  const session = connections.get(req.params.sessionId);
-  const { query, schema } = req.body;
-
-  if (!session || !session.pool || session.expiresAt < Date.now()) {
-    return res.status(401).json({ error: 'Not connected' });
-  }
-
-  if (!query || !query.trim()) {
+  const session = getSession(req, res);
+  if (!session) return;
+  const { query, schema } = req.body || {};
+  if (typeof query !== 'string' || !query.trim()) {
     return res.status(400).json({ success: false, error: 'Query cannot be empty' });
   }
-
-  // Basic blacklist for potentially dangerous operations (best-effort)
-  const dangerous = /(CREATE\s+FUNCTION|CREATE\s+EXTENSION|ALTER\s+SYSTEM|COPY\s+(TO|FROM)|\\\\.|pg_catalog|pg_read|pg_write)/i;
-  if (dangerous.test(query)) {
-    return res.status(400).json({ success: false, error: 'Query contains disallowed operations' });
+  if (Buffer.byteLength(query) > MAX_SQL_BYTES || countStatements(query) > MAX_STATEMENTS) {
+    return res.status(413).json({ success: false, error: `Use at most ${MAX_SQL_BYTES} bytes and ${MAX_STATEMENTS} statements per script.` });
   }
-
-  if (schema && !isValidIdentifier(schema)) {
+  if (schema !== undefined && !isValidIdentifier(schema)) {
     return res.status(400).json({ success: false, error: 'Invalid schema name' });
   }
 
+  session.busy = true;
   const startTime = Date.now();
-  const client = await session.pool.connect();
-
+  let client;
   try {
-    // enforce per-connection timeouts (re-applied for each acquired client)
-    await client.query('SET statement_timeout = 10000');
-    await client.query('SET idle_in_transaction_session_timeout = 20000');
-
-    // Set the search_path to the selected schema if provided
-    if (schema) {
-      await client.query(`SET search_path TO "${schema}", public`);
+    client = await session.pool.connect();
+    // An aborted transaction must be allowed to reach ROLLBACK without a SET first.
+    if (schema && client.getTransactionStatus() !== 'E') {
+      await client.query(`SET search_path TO ${quoteIdentifier(schema)}, public`);
     }
-
-    const result = await client.query(query);
-    const executionTime = Date.now() - startTime;
-
-    // Map PostgreSQL type OIDs to human-readable type names
-    let columns = [];
-    if (result.fields && result.fields.length > 0) {
-      const oids = [...new Set(result.fields.map(f => f.dataTypeID))];
-
-      // Query pg_type to get typname for these OIDs
-      const oidParams = oids.map((_, i) => `$${i + 1}`).join(',');
-      let oidMap = {};
-      if (oids.length > 0) {
-        try {
-          const typeRes = await client.query(
-            `SELECT oid, typname FROM pg_type WHERE oid IN (${oidParams})`,
-            oids
-          );
-          for (const row of typeRes.rows) {
-            const oidNum = parseInt(row.oid, 10);
-            const rawName = String(row.typname || '').toLowerCase();
-            const friendly = TYPE_FRIENDLY[rawName] || row.typname;
-            oidMap[oidNum] = friendly;
-          }
-        } catch (e) {
-          console.error('Error fetching type names:', e);
-        }
-      }
-
-      columns = result.fields.map(f => ({
-        name: f.name,
-        dataTypeID: f.dataTypeID,
-        type: oidMap[f.dataTypeID] || null
-      }));
+    const rawResults = await runQuery(client, session.config, query, QUERY_LIMITS);
+    const oids = [...new Set(rawResults.flatMap(result => (result.fields || []).map(field => field.dataTypeID)))];
+    const types = new Map();
+    if (oids.length) {
+      const result = await client.query('SELECT oid, typname FROM pg_catalog.pg_type WHERE oid = ANY($1::oid[])', [oids]);
+      for (const type of result.rows) types.set(Number(type.oid), TYPE_FRIENDLY[type.typname] || type.typname);
     }
-
-    res.json({
-      success: true,
-      columns,
+    const results = rawResults.map(result => ({
+      columns: (result.fields || []).map(field => ({
+        name: field.name, dataTypeID: field.dataTypeID, type: types.get(field.dataTypeID) || null
+      })),
       rows: result.rows,
       rowCount: result.rowCount,
-      executionTime: `${executionTime}ms`,
-      command: result.command
+      command: result.command,
+      truncated: result.truncated
+    }));
+    // Include metadata in the response limit, even for scripts with no data rows.
+    if (Buffer.byteLength(JSON.stringify(results)) > QUERY_LIMITS.bytes + 65536) {
+      return res.status(413).json({ success: false, error: 'Result metadata is too large. Select fewer columns or statements.' });
+    }
+    res.json({
+      success: true, results,
+      executionTime: `${Date.now() - startTime}ms`,
+      transactionStatus: client.getTransactionStatus()
     });
   } catch (error) {
-    // Log full error server-side for debugging
     console.error('Query error:', error);
-
-    // Build a sanitized error payload for clients/students.
-    // Include common postgres error properties if present, but avoid exposing stack traces or internal details.
     const clientError = {
       success: false,
       error: 'Query failed',
-      // Provide the short message from PG if available
-      message: error && error.message ? String(error.message) : undefined,
-      // PostgreSQL error code (eg. '42601' for syntax_error)
-      code: error && error.code ? String(error.code) : undefined,
-      // More detailed information PG may provide
-      detail: error && error.detail ? String(error.detail) : undefined,
-      hint: error && error.hint ? String(error.hint) : undefined,
-      position: error && (error.position || error.cursorPosition) ? String(error.position || error.cursorPosition) : undefined,
-      // Indicate if the error was a statement timeout
-      timeout: error && (error.code === '57014' || /statement timeout/i.test(error.message || '')) ? true : undefined
+      message: error.message,
+      code: error.code,
+      detail: error.detail,
+      hint: error.hint,
+      position: error.position || error.cursorPosition,
+      transactionStatus: client?.getTransactionStatus(),
+      timeout: error.code === '57014' || /statement timeout/i.test(error.message || '')
     };
-
-    // Remove undefined fields so the client sees only present info
-    Object.keys(clientError).forEach(k => clientError[k] === undefined && delete clientError[k]);
-
     res.status(400).json(clientError);
   } finally {
-    client.release();
+    if (client) client.release();
+    session.busy = false;
   }
 });
 
-// Cleanup on shutdown
-process.on('SIGINT', async () => {
-  console.log('Shutting down gracefully...');
-  for (const pool of connections.values()) {
-    await pool.end();
-  }
-  process.exit();
+app.use((error, req, res, next) => {
+  if (res.headersSent) return next(error);
+  console.error('Request error:', error);
+  res.status(error.status || 500).json({
+    success: false,
+    error: error.status === 413 ? 'Request too large' : error.status === 400 ? 'Invalid JSON request' : 'Internal server error'
+  });
 });
 
-process.on('SIGTERM', async () => {
-  console.log('SIGTERM received, shutting down...');
-  for (const pool of connections.values()) {
-    await pool.end();
-  }
-  process.exit();
-});
-
-app.listen(3000, '0.0.0.0', () => {
-  console.log(`Server running on http://localhost:3000`);
-  console.log(`PostgreSQL Connection: postgres:5432`);
+const server = app.listen(positiveInteger('PORT', 3000), '0.0.0.0', () => {
+  console.log(`Server running on port ${server.address().port}`);
 });
 
 // Periodic sweeper to close expired sessions
-setInterval(async () => {
+const sessionSweeper = setInterval(async () => {
   const now = Date.now();
+  const expired = [];
   for (const [id, session] of connections.entries()) {
     if (session && session.expiresAt && session.expiresAt < now) {
-      try {
-        await session.pool.end();
-      } catch (e) {
-        console.error('Error ending expired pool:', e);
-      }
-      connections.delete(id);
-      console.log('Expired session cleaned:', id);
+      expired.push(closeSession(id));
     }
   }
+  await Promise.all(expired);
 }, 1000 * 60 * 5); // every 5 minutes
+
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received, shutting down...`);
+  clearInterval(sessionSweeper);
+
+  // Leave time for cleanup before Docker's default 10-second stop deadline.
+  const deadline = setTimeout(() => {
+    console.error('Shutdown timed out');
+    process.exit(1);
+  }, 8000);
+  deadline.unref();
+
+  try {
+    // Stop accepting connections and let in-flight requests release their clients.
+    await new Promise((resolve, reject) => {
+      server.close(error => error ? reject(error) : resolve());
+    });
+    await Promise.all([...connections.keys()].map(closeSession));
+    // Include cleanup already started by the expiry sweeper or disconnects.
+    await Promise.all([...closingPools]);
+    clearTimeout(deadline);
+    process.exit(0);
+  } catch (error) {
+    console.error('Shutdown error:', error);
+    process.exit(1);
+  }
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
